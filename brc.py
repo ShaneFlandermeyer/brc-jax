@@ -17,7 +17,7 @@ from jaxtyping import PRNGKeyArray, PyTree
 from ensemble import Ensemble
 from bronet import BroNet
 import temperature
-from util import hl_gauss, hl_gauss_inv, cross_entropy, sg
+from util import categorical_target, cross_entropy, sg
 import jax
 
 MIN_LOG_STD = -10
@@ -223,10 +223,7 @@ class BRC(struct.PyTreeNode):
     ).astype(jnp.float32)
 
     probs = jax.nn.softmax(logits, axis=-1)
-    Q = hl_gauss_inv(
-        probs, self.min_value, self.max_value, self.num_value_bins
-    )
-    return Q, logits
+    return probs, logits
 
   def update(
       self,
@@ -241,6 +238,10 @@ class BRC(struct.PyTreeNode):
   ) -> Tuple[BRC, Dict[str, Any]]:
     value_loss_key, policy_loss_key = jax.random.split(key, 2)
 
+    # Scale reward (Equation (3))
+    # TODO: Also need to correctly update this scale
+    rewards = rewards / self.value_scale
+
     # Update value function
     def value_loss_fn(
         value_params: flax.core.FrozenDict
@@ -248,47 +249,48 @@ class BRC(struct.PyTreeNode):
       next_action_key, value_key, value_target_key = jax.random.split(
           value_loss_key, 3
       )
+      _, value_logits = self.Q(
+          obs=observations,
+          action=actions,
+          params=value_params,
+          key=value_key,
+      )
 
-      # TD Targets
+      # Value target distribution
       next_action = self.sample_actions(
           obs=next_observations,
           params=self.policy_model.params,
           deterministic=False,
           key=next_action_key,
       )[0]
-      next_Qs, _ = self.Q(
+      next_probs, _ = self.Q(
           obs=next_observations,
           action=next_action,
           params=self.target_value_model.params,
           key=value_target_key,
       )
-      next_Q = next_Qs.mean(axis=0)
-      td_targets = rewards + (1 - terminated) * self.discount * next_Q
-
-      value_pred, value_logits = self.Q(
-          obs=observations,
-          action=actions,
-          params=value_params,
-          key=value_key,
-      )
-      value_loss = cross_entropy(
-          pred_logits=value_logits,
-          target=sg(hl_gauss(
-              x=td_targets,
-              low=self.min_value,
-              high=self.max_value,
-              num_bins=self.num_value_bins,
-              sigma=0.75,
-          )),
+      td_target = categorical_target(
+          next_probs=next_probs.mean(axis=0),
+          rewards=rewards,
+          terminated=terminated,
+          discount=self.discount,
           low=self.min_value,
           high=self.max_value,
           num_bins=self.num_value_bins,
-      ).mean()
+      )
+
+      value_loss = cross_entropy(
+          pred_logits=value_logits,
+          target=sg(td_target),
+          low=self.min_value,
+          high=self.max_value,
+          num_bins=self.num_value_bins,
+      )
       value_info = dict(
           value_loss=value_loss,
-          value_mae=jnp.abs(value_pred - td_targets).mean(),
       )
       return value_loss, value_info
+
     value_grads, value_info = jax.grad(value_loss_fn, has_aux=True)(
         self.value_model.params
     )
