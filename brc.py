@@ -33,6 +33,7 @@ class BRC(struct.PyTreeNode):
 
   batch_size: int = struct.field(pytree_node=False)
   discount: float
+  tau: float
 
   num_value_nets: int = struct.field(pytree_node=False)
   num_value_bins: int = struct.field(pytree_node=False)
@@ -50,6 +51,7 @@ class BRC(struct.PyTreeNode):
       state_dim: int,
       batch_size: int,
       discount: float,
+      tau: float,
       # Policy params
       policy_dim: int,
       policy_num_blocks: int,
@@ -153,6 +155,7 @@ class BRC(struct.PyTreeNode):
         temperature_model=temperature_model,
         batch_size=batch_size,
         discount=discount,
+        tau=tau,
         num_value_nets=num_value_nets,
         min_value=min_value,
         max_value=max_value,
@@ -238,14 +241,15 @@ class BRC(struct.PyTreeNode):
   ) -> Tuple[BRC, Dict[str, Any]]:
     value_loss_key, policy_loss_key = jax.random.split(key, 2)
 
-    # Scale reward (Equation (3))
-    # TODO: Also need to correctly update this scale
-    rewards = rewards / self.value_scale
+    support = jnp.linspace(
+        self.min_value, self.max_value, self.num_value_bins
+    )
 
     # Update value function
     def value_loss_fn(
         value_params: flax.core.FrozenDict
     ) -> Tuple[jax.Array, Dict[str, Any]]:
+      # TODO: Include entropy term in value loss?
       next_action_key, value_key, value_target_key = jax.random.split(
           value_loss_key, 3
       )
@@ -269,9 +273,18 @@ class BRC(struct.PyTreeNode):
           params=self.target_value_model.params,
           key=value_target_key,
       )
+
+      # Scale reward (Equation (3))
+      # NOTE: Using EMA for value scale to avoid outliers
+      next_Qs = jnp.sum(next_probs * support, axis=-1) * self.value_scale
+      max_Q = jnp.max(rewards + next_Qs.mean(axis=0))
+      value_scale = (
+          self.tau * max_Q + (1 - self.tau) * self.value_scale
+      ).clip(1, None)
+
       td_target = categorical_target(
           next_probs=next_probs.mean(axis=0),
-          rewards=rewards,
+          rewards=rewards / sg(value_scale),
           terminated=terminated,
           discount=self.discount,
           low=self.min_value,
@@ -280,14 +293,11 @@ class BRC(struct.PyTreeNode):
       )
 
       value_loss = cross_entropy(
-          pred_logits=value_logits,
-          target=sg(td_target),
-          low=self.min_value,
-          high=self.max_value,
-          num_bins=self.num_value_bins,
-      )
+          pred_logits=value_logits, target=sg(td_target)
+      ).mean()
       value_info = dict(
           value_loss=value_loss,
+          value_scale=value_scale,
       )
       return value_loss, value_info
 
@@ -314,19 +324,15 @@ class BRC(struct.PyTreeNode):
           deterministic=False,
           key=action_key,
       )
-      Qs, _ = self.Q(
+
+      # Compute Q values
+      probs, _ = self.Q(
           obs=observations,
           action=actions,
           params=self.value_model.params,
           key=value_key,
       )
-      Q = Qs.mean(axis=0)
-
-      # Update value scale
-      tau = 0.01
-      percentiles = jnp.percentile(Q.mean(axis=0), jnp.array([5, 95]))
-      scale = percentiles[1] - percentiles[0]
-      value_scale = tau * scale + (1 - tau) * self.value_scale
+      Q = jnp.sum(probs * support, axis=-1).mean(axis=0)
 
       alpha = self.temperature_model.apply_fn(
           {'params': self.temperature_model.params}
@@ -334,9 +340,8 @@ class BRC(struct.PyTreeNode):
       policy_loss = (alpha * log_probs - Q).mean()
       policy_info = dict(
           policy_loss=policy_loss,
-          entropy=-log_probs.mean(),
-          std=jnp.exp(log_std).mean(),
-          value_scale=value_scale,
+          policy_entropy=-log_probs,
+          policy_std=jnp.exp(log_std),
       )
       return policy_loss, policy_info
     policy_grads, policy_info = jax.grad(policy_loss_fn, has_aux=True)(
@@ -347,7 +352,7 @@ class BRC(struct.PyTreeNode):
     # Update temperature
     new_temperature, temperature_info = temperature.update_temperature(
         model=self.temperature_model,
-        entropy=policy_info['entropy'],
+        entropy=policy_info['policy_entropy'],
         target_entropy=self.target_entropy
     )
 
@@ -356,9 +361,11 @@ class BRC(struct.PyTreeNode):
         value_model=new_value_model,
         target_value_model=new_target_value_model,
         temperature_model=new_temperature,
-        value_scale=policy_info['value_scale'],
+        value_scale=value_info['value_scale'],
     )
     info = {**value_info, **policy_info, **temperature_info}
+
+    return new_agent, info
 
 
 if __name__ == "__main__":
@@ -380,6 +387,7 @@ if __name__ == "__main__":
       value_num_blocks=2,
       num_value_nets=2,
       value_lr=3e-4,
+      tau=0.01,
       min_value=-10,
       max_value=10,
       num_value_bins=101,
