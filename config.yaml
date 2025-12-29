@@ -1,0 +1,20 @@
+hydra:
+  job:
+    name: ${env.env_id}_s${seed}
+  run:
+    dir: outputs/${hydra.job.name}/${now:%Y-%m-%d_%H-%M-%S}
+
+seed: 0
+max_steps: 1_000_000
+buffer_size: 1_000_000
+save_interval_steps: 100000
+log_interval_steps: 10000
+
+env:
+  backend: gymnasium
+  env_id: HalfCheetah-v5
+  num_envs: 4
+  utd_ratio: 1.0
+  asynchronous: True
+
+  dmc: { obs_type: state }
