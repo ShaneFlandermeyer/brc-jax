@@ -2,22 +2,18 @@ import os
 from collections import defaultdict
 from functools import partial
 
-import flax.linen as nn
 import gymnasium as gym
 import hydra
 import jax
-import jax.numpy as jnp
 import numpy as np
-import optax
 import orbax.checkpoint as ocp
 # Tensorboard: Prevent tf from allocating full GPU memory
 import tensorflow as tf
 import tqdm
 from flax.metrics import tensorboard
-from flax.training.train_state import TrainState
 
-from brc import BRC
-from buffer import ReplayBuffer
+from brc_jax.brc import BRC
+from brc_jax.buffer import ReplayBuffer
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
   tf.config.experimental.set_memory_growth(gpu, True)
@@ -25,7 +21,6 @@ for gpu in gpus:
 
 @hydra.main(config_name='config', config_path='.', version_base=None)
 def train(cfg: dict):
-  env_config = cfg['env']
   ##############################
   # Logger setup
   ##############################
@@ -36,7 +31,7 @@ def train(cfg: dict):
   ##############################
   # Environment setup
   ##############################
-  def make_env(env_config, seed):
+  def make_env(config, seed):
     def make_gym_env(env_id, seed):
       env = gym.make(env_id)
       env = gym.wrappers.RescaleAction(env, min_action=-1, max_action=1)
@@ -46,26 +41,26 @@ def train(cfg: dict):
       env.observation_space.seed(seed)
       return env
 
-    if env_config.backend == "gymnasium":
-      return make_gym_env(env_config.env_id, seed)
-    elif env_config.backend == "dmc":
-      env = make_dmc_env(env_config.env_id, seed, env_config.dmc.obs_type)
+    if config.backend == "gymnasium":
+      return make_gym_env(config.env_id, seed)
+    elif config.backend == "dmc":
+      env = make_dmc_env(config.env_id, seed, config.dmc.obs_type)
       env = gym.wrappers.RecordEpisodeStatistics(env)
       env = gym.wrappers.Autoreset(env)
       env.action_space.seed(seed)
       env.observation_space.seed(seed)
       return env
     else:
-      raise ValueError("Environment not supported:", env_config)
+      raise ValueError("Environment not supported:", config.env_id)
 
-  if env_config.asynchronous:
+  if cfg.env.asynchronous:
     vector_env_cls = gym.vector.AsyncVectorEnv
   else:
     vector_env_cls = gym.vector.SyncVectorEnv
   env = vector_env_cls(
       [
-          partial(make_env, env_config, seed)
-          for seed in range(cfg.seed, cfg.seed+env_config.num_envs)
+          partial(make_env, cfg.env, seed)
+          for seed in range(cfg.seed, cfg.seed+cfg.env.num_envs)
       ]
   )
   np.random.seed(cfg.seed)
@@ -81,8 +76,7 @@ def train(cfg: dict):
   )
   replay_buffer = ReplayBuffer(
       capacity=cfg.buffer_size,
-      vectorized=True,
-      num_envs=env_config.num_envs,
+      num_envs=cfg.env.num_envs,
       seed=cfg.seed,
       dummy_input=dict(
           observation=dummy_obs,
@@ -99,29 +93,14 @@ def train(cfg: dict):
   agent = BRC.create(
       action_dim=np.prod(env.single_action_space.shape),
       state_dim=env.single_observation_space.shape,
-      batch_size=256,
-      discount=0.99,
-      # Policy params
-      policy_dim=256,
-      policy_num_blocks=1,
-      policy_lr=3e-4,
-      # Value params
-      value_dim=512,
-      value_num_blocks=2,
-      num_value_nets=2,
-      value_lr=3e-4,
-      min_value=-10,
-      max_value=10,
-      num_value_bins=101,
-      init_temperature=0.1,
-      temperature_lr=1e-4,
-      target_entropy=-np.prod(env.single_action_space.shape) / 2,
-      key=jax.random.PRNGKey(0),
+      **cfg.brc,
+      target_entropy=-0.5 * np.prod(env.single_action_space.shape),
+      key=model_key,
   )
 
   global_step = 0
   options = ocp.CheckpointManagerOptions(
-      max_to_keep=1, save_interval_steps=cfg['save_interval_steps']
+      max_to_keep=1, save_interval_steps=cfg.log.save_interval_steps
   )
   checkpoint_path = os.path.join(output_dir, 'checkpoint')
   with ocp.CheckpointManager(
@@ -159,15 +138,14 @@ def train(cfg: dict):
     ##############################
     # Training loop
     ##############################
-    seed_steps = 5000
 
-    ep_count = np.zeros(env_config.num_envs, dtype=int)
+    ep_count = np.zeros(cfg.env.num_envs, dtype=int)
     prev_logged_step = global_step
     pbar = tqdm.tqdm(initial=global_step, total=cfg.max_steps)
-    done = np.zeros(env_config.num_envs, dtype=bool)
+    done = np.zeros(cfg.env.num_envs, dtype=bool)
     observation, _ = env.reset(seed=cfg.seed)
-    for global_step in range(global_step, cfg.max_steps, env_config.num_envs):
-      if global_step <= seed_steps:
+    for global_step in range(global_step, cfg.max_steps, cfg.env.num_envs):
+      if global_step <= cfg.seed_steps:
         action = env.action_space.sample()
       else:
         rng, action_key = jax.random.split(rng)
@@ -197,10 +175,8 @@ def train(cfg: dict):
       # Handle terminations/truncations
       done = np.logical_or(terminated, truncated)
       if np.any(done):
-        for ienv in range(env_config.num_envs):
+        for ienv in range(cfg.env.num_envs):
           if done[ienv]:
-            # TODO: Handle return normalization
-            # Estimate returns
             r = info['episode']['r'][ienv]
             l = info['episode']['l'][ienv]
             print(
@@ -210,16 +186,16 @@ def train(cfg: dict):
             writer.scalar(f'episode/length', l, global_step + ienv)
             ep_count[ienv] += 1
 
-      if global_step >= seed_steps:
-        if global_step == seed_steps:
+      if global_step >= cfg.seed_steps:
+        if global_step == cfg.seed_steps:
           print('Pre-training on seed data...')
-          num_updates = seed_steps
+          num_updates = cfg.seed_steps
         else:
-          num_updates = max(1, int(env_config.num_envs * env_config.utd_ratio))
+          num_updates = max(1, int(cfg.env.num_envs * cfg.utd_ratio))
 
         rng, *update_keys = jax.random.split(rng, num_updates+1)
         log_this_step = global_step >= prev_logged_step + \
-            cfg['log_interval_steps']
+            cfg.log.log_interval_steps
         if log_this_step:
           all_train_info = defaultdict(list)
           prev_logged_step = global_step
@@ -254,7 +230,7 @@ def train(cfg: dict):
             ),
         )
 
-      pbar.update(env_config.num_envs)
+      pbar.update(cfg.env.num_envs)
     pbar.close()
 
 

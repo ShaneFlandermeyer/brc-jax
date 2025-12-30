@@ -7,14 +7,38 @@ hydra:
 seed: 0
 max_steps: 1_000_000
 buffer_size: 1_000_000
-save_interval_steps: 100000
-log_interval_steps: 10000
+seed_steps: 10_000
+utd_ratio: 1.0
+
+log:
+  save_interval_steps: 100_000
+  log_interval_steps: 10_000
 
 env:
   backend: gymnasium
   env_id: HalfCheetah-v5
   num_envs: 4
-  utd_ratio: 1.0
   asynchronous: True
 
   dmc: { obs_type: state }
+
+brc:
+  # Optimization
+  batch_size: 256
+  discount: 0.99
+  learning_rate: 3e-4
+  tau: 0.01
+  dtype: bfloat16
+  # Policy
+  policy_dim: 256
+  num_policy_blocks: 1
+  # Value
+  value_dim: 512
+  num_value_blocks: 2
+  num_value_nets: 2
+  value_dropout: 0.0
+  min_value: -10
+  max_value: 10
+  num_value_bins: 101
+  # Temperature
+  init_temperature: 0.1
