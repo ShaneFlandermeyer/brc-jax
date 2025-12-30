@@ -54,10 +54,10 @@ class BRC(struct.PyTreeNode):
       tau: float,
       # Policy params
       policy_dim: int,
-      policy_num_blocks: int,
+      num_policy_blocks: int,
       # Value params
       value_dim: int,
-      value_num_blocks: int,
+      num_value_blocks: int,
       num_value_nets: int,
       value_dropout: float,
       min_value: float,
@@ -76,7 +76,7 @@ class BRC(struct.PyTreeNode):
     policy_module = nn.Sequential([
         BroNet(
             embed_dim=policy_dim,
-            num_blocks=policy_num_blocks,
+            num_blocks=num_policy_blocks,
             activation=mish,
             kernel_init=nn.initializers.truncated_normal(0.02),
             dtype=dtype,
@@ -102,7 +102,7 @@ class BRC(struct.PyTreeNode):
     value_base = partial(nn.Sequential, [
         BroNet(
             embed_dim=value_dim,
-            num_blocks=value_num_blocks,
+            num_blocks=num_value_blocks,
             activation=mish,
             dropout_rate=value_dropout,
             kernel_init=nn.initializers.truncated_normal(0.02),
@@ -398,43 +398,3 @@ class BRC(struct.PyTreeNode):
 
     probs = jax.nn.softmax(logits, axis=-1)
     return probs, logits
-
-
-if __name__ == "__main__":
-  batch_size = 32
-  state_dim = 16
-  action_dim = 4
-
-  brc = BRC.create(
-      action_dim=action_dim,
-      state_dim=state_dim,
-      batch_size=batch_size,
-      discount=0.99,
-      # Policy params
-      policy_dim=256,
-      policy_num_blocks=1,
-      policy_lr=3e-4,
-      # Value params
-      value_dim=256,
-      value_num_blocks=2,
-      num_value_nets=2,
-      value_lr=3e-4,
-      tau=0.01,
-      num_value_bins=101,
-      init_temperature=0.1,
-      temperature_lr=1e-4,
-      target_entropy=-action_dim / 2,
-      key=jax.random.PRNGKey(0),
-  )
-
-  brc.update(
-      observations=np.zeros((batch_size, state_dim)),
-      actions=np.zeros((batch_size, action_dim)),
-      rewards=np.zeros(batch_size),
-      next_observations=np.zeros((batch_size, state_dim)),
-      terminated=np.zeros(batch_size),
-      truncated=np.zeros(batch_size),
-      key=jax.random.PRNGKey(1),
-  )
-
-  print("Done")

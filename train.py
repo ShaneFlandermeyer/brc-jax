@@ -25,8 +25,6 @@ for gpu in gpus:
 
 @hydra.main(config_name='config', config_path='.', version_base=None)
 def train(cfg: dict):
-  env_config = cfg['env']
-  log_config = cfg['log']
   ##############################
   # Logger setup
   ##############################
@@ -37,7 +35,7 @@ def train(cfg: dict):
   ##############################
   # Environment setup
   ##############################
-  def make_env(env_config, seed):
+  def make_env(config, seed):
     def make_gym_env(env_id, seed):
       env = gym.make(env_id)
       env = gym.wrappers.RescaleAction(env, min_action=-1, max_action=1)
@@ -47,26 +45,26 @@ def train(cfg: dict):
       env.observation_space.seed(seed)
       return env
 
-    if env_config.backend == "gymnasium":
-      return make_gym_env(env_config.env_id, seed)
-    elif env_config.backend == "dmc":
-      env = make_dmc_env(env_config.env_id, seed, env_config.dmc.obs_type)
+    if config.backend == "gymnasium":
+      return make_gym_env(config.env_id, seed)
+    elif config.backend == "dmc":
+      env = make_dmc_env(config.env_id, seed, config.dmc.obs_type)
       env = gym.wrappers.RecordEpisodeStatistics(env)
       env = gym.wrappers.Autoreset(env)
       env.action_space.seed(seed)
       env.observation_space.seed(seed)
       return env
     else:
-      raise ValueError("Environment not supported:", env_config)
+      raise ValueError("Environment not supported:", config.env_id)
 
-  if env_config.asynchronous:
+  if cfg.env.asynchronous:
     vector_env_cls = gym.vector.AsyncVectorEnv
   else:
     vector_env_cls = gym.vector.SyncVectorEnv
   env = vector_env_cls(
       [
-          partial(make_env, env_config, seed)
-          for seed in range(cfg.seed, cfg.seed+env_config.num_envs)
+          partial(make_env, cfg.env, seed)
+          for seed in range(cfg.seed, cfg.seed+cfg.env.num_envs)
       ]
   )
   np.random.seed(cfg.seed)
@@ -83,7 +81,7 @@ def train(cfg: dict):
   replay_buffer = ReplayBuffer(
       capacity=cfg.buffer_size,
       vectorized=True,
-      num_envs=env_config.num_envs,
+      num_envs=cfg.env.num_envs,
       seed=cfg.seed,
       dummy_input=dict(
           observation=dummy_obs,
@@ -100,31 +98,14 @@ def train(cfg: dict):
   agent = BRC.create(
       action_dim=np.prod(env.single_action_space.shape),
       state_dim=env.single_observation_space.shape,
-      batch_size=256,
-      discount=0.99,
-      tau=0.01,
-      learning_rate=3e-4,
-      # Policy params
-      policy_dim=256,
-      policy_num_blocks=1,
-      # Value params
-      value_dim=256,
-      value_num_blocks=2,
-      num_value_nets=2,
-      value_dropout=0.0,
-      min_value=-10,
-      max_value=10,
-      num_value_bins=101,
-      # Temperature params
-      init_temperature=0.1,
-      target_entropy=-np.prod(env.single_action_space.shape) / 2,
-      dtype=jnp.bfloat16,
-      key=jax.random.PRNGKey(0),
+      **cfg.brc,
+      target_entropy=-0.5 * np.prod(env.single_action_space.shape),
+      key=model_key,
   )
 
   global_step = 0
   options = ocp.CheckpointManagerOptions(
-      max_to_keep=1, save_interval_steps=log_config.save_interval_steps
+      max_to_keep=1, save_interval_steps=cfg.log.save_interval_steps
   )
   checkpoint_path = os.path.join(output_dir, 'checkpoint')
   with ocp.CheckpointManager(
@@ -163,12 +144,12 @@ def train(cfg: dict):
     # Training loop
     ##############################
 
-    ep_count = np.zeros(env_config.num_envs, dtype=int)
+    ep_count = np.zeros(cfg.env.num_envs, dtype=int)
     prev_logged_step = global_step
     pbar = tqdm.tqdm(initial=global_step, total=cfg.max_steps)
-    done = np.zeros(env_config.num_envs, dtype=bool)
+    done = np.zeros(cfg.env.num_envs, dtype=bool)
     observation, _ = env.reset(seed=cfg.seed)
-    for global_step in range(global_step, cfg.max_steps, env_config.num_envs):
+    for global_step in range(global_step, cfg.max_steps, cfg.env.num_envs):
       if global_step <= cfg.seed_steps:
         action = env.action_space.sample()
       else:
@@ -199,7 +180,7 @@ def train(cfg: dict):
       # Handle terminations/truncations
       done = np.logical_or(terminated, truncated)
       if np.any(done):
-        for ienv in range(env_config.num_envs):
+        for ienv in range(cfg.env.num_envs):
           if done[ienv]:
             r = info['episode']['r'][ienv]
             l = info['episode']['l'][ienv]
@@ -215,11 +196,11 @@ def train(cfg: dict):
           print('Pre-training on seed data...')
           num_updates = cfg.seed_steps
         else:
-          num_updates = max(1, int(env_config.num_envs * env_config.utd_ratio))
+          num_updates = max(1, int(cfg.env.num_envs * cfg.env.utd_ratio))
 
         rng, *update_keys = jax.random.split(rng, num_updates+1)
         log_this_step = global_step >= prev_logged_step + \
-            log_config.log_interval_steps
+            cfg.log.log_interval_steps
         if log_this_step:
           all_train_info = defaultdict(list)
           prev_logged_step = global_step
@@ -254,7 +235,7 @@ def train(cfg: dict):
             ),
         )
 
-      pbar.update(env_config.num_envs)
+      pbar.update(cfg.env.num_envs)
     pbar.close()
 
 
