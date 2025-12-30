@@ -33,16 +33,6 @@ class ReplayBuffer():
              data: PyTree,
              mask: Optional[np.ndarray] = None
              ) -> None:
-    """
-    Insert data into the buffer
-
-    Parameters
-    ----------
-    data : PyTree
-        Data to insert
-    mask : Optional[np.ndarray], optional
-        A boolean mask of size self.num_envs, which specifies which env buffers receive new data. If None, all envs receive data, by default None
-    """
     # Insert data for the specified envs
     if mask is None:
       mask = np.ones(self.num_envs, dtype=bool)
@@ -64,24 +54,6 @@ class ReplayBuffer():
       self,
       batch_size: int,
   ) -> Union[PyTree, Tuple[PyTree, Tuple[np.ndarray]]]:
-    """
-    Sample a batch of sequences from the buffer.
-
-    Sequences are drawn uniformly from each environment buffer, and they may cross episode boundaries.
-
-    Parameters
-    ----------
-    batch_size : int
-    sequence_length : int
-    return_inds : bool
-        If True, also returns
-
-    Returns
-    -------
-    Union[PyTree, Tuple[PyTree, Tuple[np.ndarray]]]
-        The sampled batch. If return_inds is True, also returns the sampled indices in the batch/time dimensions
-    """
-
     if self.vectorized:
       batch = self._sample_vectorized(batch_size)
     else:
@@ -113,10 +85,7 @@ class ReplayBuffer():
         endpoint=True,
     )
 
-    batch = jax.tree.map(
-        lambda x: x[inds[:, None], env_inds[:, None]],
-        self.data
-    )
+    batch = jax.tree.map(lambda x: x[inds, env_inds], self.data)
 
     return batch
 

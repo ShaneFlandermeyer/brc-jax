@@ -26,6 +26,7 @@ for gpu in gpus:
 @hydra.main(config_name='config', config_path='.', version_base=None)
 def train(cfg: dict):
   env_config = cfg['env']
+  log_config = cfg['log']
   ##############################
   # Logger setup
   ##############################
@@ -101,27 +102,29 @@ def train(cfg: dict):
       state_dim=env.single_observation_space.shape,
       batch_size=256,
       discount=0.99,
+      tau=0.01,
       # Policy params
       policy_dim=256,
       policy_num_blocks=1,
       policy_lr=3e-4,
       # Value params
-      value_dim=512,
+      value_dim=256,
       value_num_blocks=2,
       num_value_nets=2,
       value_lr=3e-4,
       min_value=-10,
       max_value=10,
       num_value_bins=101,
+      # Temperature params
       init_temperature=0.1,
-      temperature_lr=1e-4,
+      temperature_lr=3e-4,
       target_entropy=-np.prod(env.single_action_space.shape) / 2,
       key=jax.random.PRNGKey(0),
   )
 
   global_step = 0
   options = ocp.CheckpointManagerOptions(
-      max_to_keep=1, save_interval_steps=cfg['save_interval_steps']
+      max_to_keep=1, save_interval_steps=log_config.save_interval_steps
   )
   checkpoint_path = os.path.join(output_dir, 'checkpoint')
   with ocp.CheckpointManager(
@@ -159,7 +162,6 @@ def train(cfg: dict):
     ##############################
     # Training loop
     ##############################
-    seed_steps = 5000
 
     ep_count = np.zeros(env_config.num_envs, dtype=int)
     prev_logged_step = global_step
@@ -167,7 +169,7 @@ def train(cfg: dict):
     done = np.zeros(env_config.num_envs, dtype=bool)
     observation, _ = env.reset(seed=cfg.seed)
     for global_step in range(global_step, cfg.max_steps, env_config.num_envs):
-      if global_step <= seed_steps:
+      if global_step <= cfg.seed_steps:
         action = env.action_space.sample()
       else:
         rng, action_key = jax.random.split(rng)
@@ -199,8 +201,6 @@ def train(cfg: dict):
       if np.any(done):
         for ienv in range(env_config.num_envs):
           if done[ienv]:
-            # TODO: Handle return normalization
-            # Estimate returns
             r = info['episode']['r'][ienv]
             l = info['episode']['l'][ienv]
             print(
@@ -210,16 +210,16 @@ def train(cfg: dict):
             writer.scalar(f'episode/length', l, global_step + ienv)
             ep_count[ienv] += 1
 
-      if global_step >= seed_steps:
-        if global_step == seed_steps:
+      if global_step >= cfg.seed_steps:
+        if global_step == cfg.seed_steps:
           print('Pre-training on seed data...')
-          num_updates = seed_steps
+          num_updates = cfg.seed_steps
         else:
           num_updates = max(1, int(env_config.num_envs * env_config.utd_ratio))
 
         rng, *update_keys = jax.random.split(rng, num_updates+1)
         log_this_step = global_step >= prev_logged_step + \
-            cfg['log_interval_steps']
+            log_config.log_interval_steps
         if log_this_step:
           all_train_info = defaultdict(list)
           prev_logged_step = global_step
