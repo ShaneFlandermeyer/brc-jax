@@ -2,22 +2,18 @@ import os
 from collections import defaultdict
 from functools import partial
 
-import flax.linen as nn
 import gymnasium as gym
 import hydra
 import jax
-import jax.numpy as jnp
 import numpy as np
-import optax
 import orbax.checkpoint as ocp
 # Tensorboard: Prevent tf from allocating full GPU memory
 import tensorflow as tf
 import tqdm
 from flax.metrics import tensorboard
-from flax.training.train_state import TrainState
 
-from brc import BRC
-from buffer import ReplayBuffer
+from brc_jax.brc import BRC
+from brc_jax.buffer import ReplayBuffer
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
   tf.config.experimental.set_memory_growth(gpu, True)
@@ -80,7 +76,6 @@ def train(cfg: dict):
   )
   replay_buffer = ReplayBuffer(
       capacity=cfg.buffer_size,
-      vectorized=True,
       num_envs=cfg.env.num_envs,
       seed=cfg.seed,
       dummy_input=dict(

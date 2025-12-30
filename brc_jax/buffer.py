@@ -12,11 +12,9 @@ class ReplayBuffer():
                capacity: int,
                dummy_input: Dict,
                num_envs: int = 1,
-               vectorized: bool = False,
                seed: Optional[int] = None,
                ):
 
-    self.vectorized = vectorized
     self.num_envs = num_envs
     self.capacity = capacity // num_envs
     self.size = np.zeros(num_envs, dtype=int)
@@ -36,16 +34,9 @@ class ReplayBuffer():
     # Insert data for the specified envs
     if mask is None:
       mask = np.ones(self.num_envs, dtype=bool)
-
-    if self.vectorized:
-      def masked_set(x, y):
-        x[self.current_ind, mask] = y[mask]
-      jax.tree.map(masked_set, self.data, data)
-    else:
-      jax.tree.map(
-          lambda x, y: x.__setitem__(self.current_ind, y), self.data, data
-      )
-
+    def masked_set(x, y):
+      x[self.current_ind, mask] = y[mask]
+    jax.tree.map(masked_set, self.data, data)
     # Update buffer state
     self.current_ind[mask] = (self.current_ind[mask] + 1) % self.capacity
     self.size[mask] = np.clip(self.size[mask] + 1, 0, self.capacity)
@@ -54,26 +45,6 @@ class ReplayBuffer():
       self,
       batch_size: int,
   ) -> Union[PyTree, Tuple[PyTree, Tuple[np.ndarray]]]:
-    if self.vectorized:
-      batch = self._sample_vectorized(batch_size)
-    else:
-      batch = self._sample(batch_size)
-
-    return batch
-
-  def _sample(self, batch_size: int) -> PyTree:
-    # Sample envs and start indices
-    inds = self.np_random.integers(
-        low=0, high=self.size,
-        size=batch_size,
-        endpoint=True,
-    )
-
-    batch = jax.tree.map(lambda x: x[inds], self.data)
-
-    return batch
-
-  def _sample_vectorized(self, batch_size: int) -> PyTree:
     # Sample envs and start indices
     env_inds = self.np_random.integers(
         low=0, high=self.num_envs,

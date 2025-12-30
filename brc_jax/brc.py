@@ -2,21 +2,20 @@ from __future__ import annotations
 
 import copy
 from functools import partial
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import flax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 import tensorflow_probability.substrates.jax.distributions as tfd
 from flax import struct
 from flax.training.train_state import TrainState
-from jaxtyping import PRNGKeyArray, PyTree
-from bronet import BroNet
-import temperature
-from util import categorical_target, cross_entropy, mish, sg
+from jaxtyping import PRNGKeyArray
+from brc_jax.bronet import BroNet
+from brc_jax.temperature import Temperature, update_temperature
+from brc_jax.util import categorical_target, cross_entropy, mish, sg
 import jax
 
 MIN_LOG_STD = -10
@@ -140,7 +139,7 @@ class BRC(struct.PyTreeNode):
     )
 
     # Temperature
-    temperature_module = temperature.Temperature(
+    temperature_module = Temperature(
         initial_temperature=init_temperature
     )
     temperature_model = TrainState.create(
@@ -332,7 +331,7 @@ class BRC(struct.PyTreeNode):
     new_policy = self.policy_model.apply_gradients(grads=policy_grads)
 
     # Update temperature
-    new_temperature, temperature_info = temperature.update_temperature(
+    new_temperature, temperature_info = update_temperature(
         model=self.temperature_model,
         entropy=policy_info['policy_entropy'],
         target_entropy=self.target_entropy
