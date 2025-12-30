@@ -1,6 +1,8 @@
 import jax
-import jax.scipy.special
 import jax.numpy as jnp
+
+def mish(x: jax.Array) -> jax.Array:
+  return x * jnp.tanh(jax.nn.softplus(x))
 
 
 def sg(x): return jax.tree.map(jax.lax.stop_gradient, x)

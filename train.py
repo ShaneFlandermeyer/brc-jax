@@ -103,22 +103,22 @@ def train(cfg: dict):
       batch_size=256,
       discount=0.99,
       tau=0.01,
+      learning_rate=3e-4,
       # Policy params
       policy_dim=256,
       policy_num_blocks=1,
-      policy_lr=3e-4,
       # Value params
       value_dim=256,
       value_num_blocks=2,
       num_value_nets=2,
-      value_lr=3e-4,
+      value_dropout=0.0,
       min_value=-10,
       max_value=10,
       num_value_bins=101,
       # Temperature params
       init_temperature=0.1,
-      temperature_lr=3e-4,
       target_entropy=-np.prod(env.single_action_space.shape) / 2,
+      dtype=jnp.bfloat16,
       key=jax.random.PRNGKey(0),
   )
 

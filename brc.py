@@ -14,10 +14,9 @@ import tensorflow_probability.substrates.jax.distributions as tfd
 from flax import struct
 from flax.training.train_state import TrainState
 from jaxtyping import PRNGKeyArray, PyTree
-from ensemble import Ensemble
 from bronet import BroNet
 import temperature
-from util import categorical_target, cross_entropy, sg
+from util import categorical_target, cross_entropy, mish, sg
 import jax
 
 MIN_LOG_STD = -10
@@ -48,24 +47,24 @@ class BRC(struct.PyTreeNode):
       # TODO: Better handling for state and action dims
       action_dim: int,
       state_dim: int,
+      # Optimization params
       batch_size: int,
       discount: float,
+      learning_rate: float,
       tau: float,
       # Policy params
       policy_dim: int,
       policy_num_blocks: int,
-      policy_lr: float,
       # Value params
       value_dim: int,
       value_num_blocks: int,
       num_value_nets: int,
-      value_lr: float,
+      value_dropout: float,
       min_value: float,
       max_value: float,
       num_value_bins: int,
       # Temperature params
       init_temperature: float,
-      temperature_lr: float,
       target_entropy: float,
       dtype: jnp.dtype = jnp.float32,
       *,
@@ -75,8 +74,18 @@ class BRC(struct.PyTreeNode):
 
     # Policy model
     policy_module = nn.Sequential([
-        BroNet(embed_dim=policy_dim, num_blocks=policy_num_blocks),
-        nn.Dense(2*action_dim),
+        BroNet(
+            embed_dim=policy_dim,
+            num_blocks=policy_num_blocks,
+            activation=mish,
+            kernel_init=nn.initializers.truncated_normal(0.02),
+            dtype=dtype,
+        ),
+        nn.Dense(
+            2*action_dim,
+            kernel_init=nn.initializers.truncated_normal(0.02),
+            dtype=dtype
+        )
     ])
 
     policy_model = TrainState.create(
@@ -84,17 +93,36 @@ class BRC(struct.PyTreeNode):
         params=policy_module.init(policy_key, jnp.zeros(state_dim))['params'],
         tx=optax.chain(
             optax.zero_nans(),
-            optax.adamw(policy_lr),
+            optax.adamw(learning_rate),
         )
     )
 
     # Value model
     value_param_key, value_dropout_key = jax.random.split(value_key)
     value_base = partial(nn.Sequential, [
-        BroNet(embed_dim=value_dim, num_blocks=value_num_blocks),
-        nn.Dense(num_value_bins, kernel_init=jax.nn.initializers.zeros)
+        BroNet(
+            embed_dim=value_dim,
+            num_blocks=value_num_blocks,
+            activation=mish,
+            dropout_rate=value_dropout,
+            kernel_init=nn.initializers.truncated_normal(0.02),
+            dtype=dtype,
+        ),
+        nn.Dense(
+            num_value_bins, kernel_init=jax.nn.initializers.zeros, dtype=dtype
+        )
     ])
-    value_ensemble = Ensemble(value_base, num=num_value_nets)
+    value_ensemble = nn.vmap(
+        value_base,
+        variable_axes={'params': 0},
+        split_rngs={
+            'params': True,
+            'dropout': True
+        },
+        in_axes=None,
+        out_axes=0,
+        axis_size=num_value_nets
+    )()
     value_model = TrainState.create(
         apply_fn=value_ensemble.apply,
         params=value_ensemble.init(
@@ -102,7 +130,7 @@ class BRC(struct.PyTreeNode):
             jnp.zeros(state_dim + action_dim))['params'],
         tx=optax.chain(
             optax.zero_nans(),
-            optax.adamw(value_lr),
+            optax.adamw(learning_rate),
         )
     )
     target_value_model = TrainState.create(
@@ -120,7 +148,7 @@ class BRC(struct.PyTreeNode):
         params=temperature_module.init(jax.random.PRNGKey(0))['params'],
         tx=optax.chain(
             optax.zero_nans(),
-            optax.adamw(temperature_lr),
+            optax.adamw(learning_rate),
         )
     )
 
@@ -202,6 +230,7 @@ class BRC(struct.PyTreeNode):
       _, value_logits = self.Q(
           obs=observations,
           action=actions,
+          train=True,
           params=value_params,
           key=value_key,
       )
@@ -219,12 +248,13 @@ class BRC(struct.PyTreeNode):
       next_value_probs, _ = self.Q(
           obs=next_observations,
           action=next_action,
+          train=True,
           params=self.target_value_model.params,
           key=value_target_key,
       )
 
       # Update value/reward scale
-      # Unlike in the paper, values are normalized by the EMA of the max target Q value in each batch. 
+      # Unlike in the paper, values are normalized by the EMA of the max target Q value in each batch.
       next_Qs = self.value_scale / self.support[-1] * jnp.sum(
           next_value_probs * self.support, axis=-1
       )
@@ -280,6 +310,7 @@ class BRC(struct.PyTreeNode):
       probs, _ = self.Q(
           obs=observations,
           action=actions,
+          train=True,
           params=self.value_model.params,
           key=value_key,
       )
@@ -356,12 +387,13 @@ class BRC(struct.PyTreeNode):
       self,
       obs: jax.Array,
       action: jax.Array,
+      train: bool,
       params: Dict[str, Any],
       key: PRNGKeyArray,
   ) -> jax.Array:
     z = jnp.concatenate([obs, action], axis=-1)
     logits = self.value_model.apply_fn(
-        {'params': params}, z, rngs={'dropout': key}
+        {'params': params}, z, train, rngs={'dropout': key}
     ).astype(jnp.float32)
 
     probs = jax.nn.softmax(logits, axis=-1)
