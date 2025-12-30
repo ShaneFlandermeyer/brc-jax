@@ -196,7 +196,7 @@ def train(cfg: dict):
           print('Pre-training on seed data...')
           num_updates = cfg.seed_steps
         else:
-          num_updates = max(1, int(cfg.env.num_envs * cfg.env.utd_ratio))
+          num_updates = max(1, int(cfg.env.num_envs * cfg.utd_ratio))
 
         rng, *update_keys = jax.random.split(rng, num_updates+1)
         log_this_step = global_step >= prev_logged_step + \
