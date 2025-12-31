@@ -300,7 +300,11 @@ class BRC(struct.PyTreeNode):
           key=value_key,
       )
       Q = symexp(jnp.sum(probs * self.support, axis=-1)).mean(axis=0)
-      value_scale = self.tau * abs(Q).max() + (1 - self.tau) * self.value_scale
+      
+      # Update value scale
+      percentiles = jnp.percentile(Q, jnp.array([5, 95]))
+      scale = abs(percentiles).max()
+      value_scale = self.tau * scale + (1 - self.tau) * self.value_scale
 
       alpha = self.temperature_model.apply_fn(
           {'params': self.temperature_model.params}
