@@ -15,7 +15,7 @@ from flax.training.train_state import TrainState
 from jaxtyping import PRNGKeyArray
 from brc_jax.bronet import BroNet
 from brc_jax.temperature import Temperature, update_temperature
-from brc_jax.util import categorical_target, cross_entropy, mish, sg
+from brc_jax.util import categorical_target, cross_entropy, mish, sg, symexp, symlog
 import jax
 
 MIN_LOG_STD = -10
@@ -219,22 +219,14 @@ class BRC(struct.PyTreeNode):
   ) -> Tuple[BRC, Dict[str, Any]]:
     value_loss_key, policy_loss_key = jax.random.split(key, 2)
 
-    # Update value function
     def value_loss_fn(
         value_params: flax.core.FrozenDict
     ) -> Tuple[jax.Array, Dict[str, Any]]:
       next_action_key, value_key, value_target_key = jax.random.split(
           value_loss_key, 3
       )
-      _, value_logits = self.Q(
-          obs=observations,
-          action=actions,
-          train=True,
-          params=value_params,
-          key=value_key,
-      )
 
-      # Value target distribution
+      # Target distribution
       alpha = self.temperature_model.apply_fn(
           {'params': self.temperature_model.params}
       )
@@ -244,6 +236,10 @@ class BRC(struct.PyTreeNode):
           deterministic=False,
           key=next_action_key,
       )
+      entropy = -log_probs
+      Tz = rewards[..., None] + (1 - terminated[..., None]) * self.discount * (
+          symexp(self.support) + self.value_scale * alpha * entropy[..., None]
+      )
       next_value_probs, _ = self.Q(
           obs=next_observations,
           action=next_action,
@@ -251,33 +247,24 @@ class BRC(struct.PyTreeNode):
           params=self.target_value_model.params,
           key=value_target_key,
       )
-
-      # Update value/reward scale
-      # Unlike in the paper, values are normalized by the EMA of the max target Q value in each batch.
-      next_Qs = self.value_scale / self.support[-1] * jnp.sum(
-          next_value_probs * self.support, axis=-1
-      )
-      target_Qs = rewards + (1 - terminated) * self.discount * next_Qs
-      new_scale = jnp.max(abs(target_Qs))
-      value_scale = (
-          self.tau * new_scale + (1 - self.tau) * self.value_scale
-      ).clip(1, None)
-
       target_probs = categorical_target(
+          Tz=symlog(Tz),
           next_probs=next_value_probs.mean(axis=0),
-          rewards=rewards[..., None] / value_scale,
-          discount=(1 - terminated[..., None]) * self.discount,
-          alpha=alpha,
-          entropy=-log_probs[..., None],
           support=self.support,
       )
 
+      _, value_logits = self.Q(
+          obs=observations,
+          action=actions,
+          train=True,
+          params=value_params,
+          key=value_key,
+      )
       value_loss = cross_entropy(
           pred_logits=value_logits, target=sg(target_probs)
       ).mean()
       value_info = dict(
           value_loss=value_loss,
-          value_scale=value_scale,
       )
       return value_loss, value_info
 
@@ -293,7 +280,6 @@ class BRC(struct.PyTreeNode):
         )
     )
 
-    # Update policy
     def policy_loss_fn(
         policy_params: flax.core.FrozenDict
     ) -> Tuple[jax.Array, Dict[str, Any]]:
@@ -313,16 +299,18 @@ class BRC(struct.PyTreeNode):
           params=self.value_model.params,
           key=value_key,
       )
-      Q = jnp.sum(probs * self.support, axis=-1).mean(axis=0)
+      Q = symexp(jnp.sum(probs * self.support, axis=-1)).mean(axis=0)
+      value_scale = self.tau * abs(Q).max() + (1 - self.tau) * self.value_scale
 
       alpha = self.temperature_model.apply_fn(
           {'params': self.temperature_model.params}
       )
-      policy_loss = (alpha * log_probs - Q).mean()
+      policy_loss = (alpha * log_probs - Q / sg(value_scale)).mean()
       policy_info = dict(
           policy_loss=policy_loss,
           policy_entropy=-log_probs,
           policy_std=jnp.exp(log_std),
+          value_scale=value_scale,
       )
       return policy_loss, policy_info
     policy_grads, policy_info = jax.grad(policy_loss_fn, has_aux=True)(
@@ -330,7 +318,6 @@ class BRC(struct.PyTreeNode):
     )
     new_policy = self.policy_model.apply_gradients(grads=policy_grads)
 
-    # Update temperature
     new_temperature, temperature_info = update_temperature(
         model=self.temperature_model,
         entropy=policy_info['policy_entropy'],
@@ -342,7 +329,7 @@ class BRC(struct.PyTreeNode):
         value_model=new_value_model,
         target_value_model=new_target_value_model,
         temperature_model=new_temperature,
-        value_scale=value_info['value_scale'],
+        value_scale=policy_info['value_scale'],
     )
     info = {**value_info, **policy_info, **temperature_info}
 

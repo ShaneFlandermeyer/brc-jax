@@ -9,18 +9,14 @@ def sg(x): return jax.tree.map(jax.lax.stop_gradient, x)
 
 
 def categorical_target(
+    Tz: jax.Array,
     next_probs: jax.Array,
-    rewards: jax.Array,
-    discount: jax.Array,
-    alpha: jax.Array,
-    entropy: jax.Array,
     support: jax.Array,
 ) -> jax.Array:
   low, high = support[0], support[-1]
   bin_width = support[1] - support[0]
   # Compute the projected Bellman update onto the support
-  Tz = (rewards + discount * (support + alpha * entropy)).clip(low, high)
-  b = (Tz - low) / bin_width
+  b = (Tz.clip(low, high) - low) / bin_width
   l = jnp.floor(b).astype(jnp.int32)
   u = jnp.ceil(b).astype(jnp.int32)
   # Disctribute probabilities
@@ -38,3 +34,9 @@ def cross_entropy(pred_logits: jax.Array, target: jax.Array) -> jax.Array:
   return -jnp.sum(
       jax.nn.log_softmax(pred_logits, axis=-1) * target, axis=-1
   )
+
+def symlog(x: jax.Array) -> jax.Array:
+  return jnp.sign(x) * jnp.log1p(jnp.abs(x))
+
+def symexp(x: jax.Array) -> jax.Array:
+  return jnp.sign(x) * (jnp.expm1(jnp.abs(x)))
